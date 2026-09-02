@@ -1,16 +1,26 @@
-"""Trade model and R arithmetic."""
+"""Trade and statistics data models."""
 
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional, List
+from enum import Enum
 import math
 
+class Direction(str, Enum):
+    """Trade direction."""
+    BUY = "BUY"
+    SELL = "SELL"
+
+class Verdict(str, Enum):
+    """Statistical verdict."""
+    HOLDING = "holding"
+    SUSPICIOUS = "suspicious"
+    TOO_LITTLE_DATA = "too little data"
+    NOT_DEFINED = "NOT DEFINED"
 
 @dataclass
 class Trade:
-    """A single aggregated trade position."""
-    
-    # Broker execution facts (never overwritten on sync)
+    """Represents a single trade."""
     position_id: int
     symbol: str
     entry_time: datetime
@@ -21,209 +31,159 @@ class Trade:
     commission: float
     swap: float
     profit: float
-    direction: str  # "BUY" or "SELL"
-    source: str = "EA LIVE"  # "EA LIVE", "EA BACKTEST", "MANUAL"
-    
-    # Calculated fields
-    broker_killzone: str = "Outside"
-    broker_macro: str = "European"
-    ny_killzone: str = "Outside"
-    ny_macro: str = "European"
+    direction: Direction
+    source: str = "EA LIVE"
+    stop_loss: Optional[float] = None
+    take_profit: Optional[float] = None
+    ny_killzone: Optional[str] = None
+    macro_session: Optional[str] = None
+    bias: Optional[str] = None
+    notes: Optional[str] = None
+    grade: Optional[str] = None
+    tags: List[str] = field(default_factory=list)
+    premises_met: List[int] = field(default_factory=list)
+    rule_breaks: List[str] = field(default_factory=list)
     r_value: Optional[float] = None
     
-    # Trader journal data (preserved on re-sync)
-    bias: Optional[str] = None
-    read: Optional[str] = None
-    notes: Optional[str] = None
-    grade: Optional[str] = None  # "A", "B", "C", "D"
-    tags: List[str] = field(default_factory=list)
-    premises_met: List[int] = field(default_factory=list)  # Indices 0-6
-    liq_swept: List[str] = field(default_factory=lambda: ["NONE"])
-    stop_loss: Optional[float] = None
-    target: Optional[float] = None
-    edited: bool = False
-    
-    # Metadata
-    created_at: datetime = field(default_factory=datetime.utcnow)
-    updated_at: datetime = field(default_factory=datetime.utcnow)
-    synced_at: Optional[datetime] = None
+    def validate(self) -> List[str]:
+        """Validate trade data. Returns list of errors."""
+        errors = []
+        if self.volume <= 0:
+            errors.append("Volume must be positive")
+        if self.entry_time >= self.exit_time:
+            errors.append("Entry time must be before exit time")
+        if self.entry_price <= 0 or self.exit_price <= 0:
+            errors.append("Prices must be positive")
+        if self.stop_loss is not None and self.stop_loss <= 0:
+            errors.append("Stop loss must be positive")
+        return errors
     
     def calculate_r(self) -> Optional[float]:
-        """
-        Calculate R (risk/reward ratio).
-        
-        BUY:  R = Profit / (Entry - Stop)
-        SELL: R = Profit / (Stop - Entry)
-        
-        Returns None if stop_loss is not set.
-        """
+        """Calculate R (risk/reward multiple). Returns None if no SL."""
         if self.stop_loss is None:
+            self.r_value = None
             return None
         
-        if self.direction.upper() == "BUY":
+        if self.direction == Direction.BUY:
             risk = self.entry_price - self.stop_loss
-        elif self.direction.upper() == "SELL":
+        else:  # SELL
             risk = self.stop_loss - self.entry_price
-        else:
-            return None
         
         if risk <= 0:
+            self.r_value = None
             return None
         
-        r = self.profit / risk
-        self.r_value = r
-        return r
-    
-    def is_backtest(self) -> bool:
-        """Return True if this trade is from backtesting."""
-        return self.source == "EA BACKTEST"
-    
-    def has_complete_premises(self) -> bool:
-        """Return True if all 7 premises are met."""
-        return len(self.premises_met) == 7
-    
-    def premise_count(self) -> int:
-        """Return count of met premises (0-7)."""
-        return len(self.premises_met)
+        self.r_value = self.profit / risk
+        return self.r_value
     
     def is_win(self) -> bool:
-        """Return True if profit > 0."""
+        """Check if trade is profitable."""
         return self.profit > 0
     
     def is_loss(self) -> bool:
-        """Return True if profit <= 0."""
-        return self.profit <= 0
+        """Check if trade is a loss."""
+        return self.profit < 0
     
-    def duration_hours(self) -> float:
-        """Return trade duration in hours."""
-        delta = self.exit_time - self.entry_time
-        return delta.total_seconds() / 3600
+    def is_backtest(self) -> bool:
+        """Check if this is a backtest trade."""
+        return self.source == "EA BACKTEST"
     
-    def validate(self) -> List[str]:
-        """
-        Validate trade integrity.
-        
-        Returns list of error messages (empty if valid).
-        """
-        errors = []
-        
-        if self.volume <= 0:
-            errors.append("Volume must be positive")
-        
-        if self.entry_time >= self.exit_time:
-            errors.append("Exit time must be after entry time")
-        
-        if self.direction.upper() not in ("BUY", "SELL"):
-            errors.append("Direction must be 'BUY' or 'SELL'")
-        
-        if self.entry_price <= 0:
-            errors.append("Entry price must be positive")
-        
-        if self.exit_price <= 0:
-            errors.append("Exit price must be positive")
-        
-        if self.stop_loss is not None:
-            if self.direction.upper() == "BUY" and self.stop_loss >= self.entry_price:
-                errors.append("BUY stop loss must be below entry price")
-            elif self.direction.upper() == "SELL" and self.stop_loss <= self.entry_price:
-                errors.append("SELL stop loss must be above entry price")
-        
-        if self.grade is not None and self.grade not in ("A", "B", "C", "D"):
-            errors.append("Grade must be A, B, C, or D")
-        
-        if not (0 <= len(self.premises_met) <= 7):
-            errors.append("Premises met must be between 0 and 7")
-        
-        return errors
+    def premise_count(self) -> int:
+        """Return number of premises met."""
+        return len(self.premises_met)
     
-    def to_dict(self) -> dict:
-        """Convert trade to dictionary for JSON serialization."""
-        return {
-            "position_id": self.position_id,
-            "symbol": self.symbol,
-            "entry_time": self.entry_time.isoformat(),
-            "entry_price": self.entry_price,
-            "exit_time": self.exit_time.isoformat(),
-            "exit_price": self.exit_price,
-            "volume": self.volume,
-            "commission": self.commission,
-            "swap": self.swap,
-            "profit": self.profit,
-            "direction": self.direction,
-            "source": self.source,
-            "broker_killzone": self.broker_killzone,
-            "broker_macro": self.broker_macro,
-            "ny_killzone": self.ny_killzone,
-            "ny_macro": self.ny_macro,
-            "r_value": self.r_value,
-            "bias": self.bias,
-            "read": self.read,
-            "notes": self.notes,
-            "grade": self.grade,
-            "tags": self.tags,
-            "premises_met": self.premises_met,
-            "liq_swept": self.liq_swept,
-            "stop_loss": self.stop_loss,
-            "target": self.target,
-            "edited": self.edited,
-            "created_at": self.created_at.isoformat(),
-            "updated_at": self.updated_at.isoformat(),
-            "synced_at": self.synced_at.isoformat() if self.synced_at else None,
-        }
-
+    def has_complete_premises(self) -> bool:
+        """Check if all 7 premises were met."""
+        return len(self.premises_met) == 7
+    
+    def has_broken_rules(self) -> bool:
+        """Check if any rules were broken."""
+        return len(self.rule_breaks) > 0
 
 def aggregate_deals(deals: List[dict]) -> Trade:
-    """
-    Aggregate multiple MT5 deals (partial closes) into a single Trade.
+    """Aggregate MT5 deals into a logical trade position.
     
-    Args:
-        deals: List of deal dicts, each with:
-            position_id, symbol, direction, entry_time, entry_price,
-            exit_time, exit_price, volume, commission, swap, profit, source
-    
-    Returns:
-        Single aggregated Trade with volume-weighted prices.
+    Handles partial closes and volume-weighted averaging.
     """
     if not deals:
-        raise ValueError("Cannot aggregate empty deal list")
-    
-    # Verify all deals share same position_id
-    position_id = deals[0]["position_id"]
-    if not all(d["position_id"] == position_id for d in deals):
-        raise ValueError("All deals must share same position_id")
+        raise ValueError("No deals to aggregate")
     
     # Sort by time
-    deals = sorted(deals, key=lambda d: d["entry_time"])
+    deals = sorted(deals, key=lambda x: x["entry_time"])
     
-    # Extract opening deal (first)
-    open_deal = deals[0]
+    position_id = deals[0]["position_id"]
+    symbol = deals[0]["symbol"]
+    direction = deals[0]["direction"]
+    entry_time = deals[0]["entry_time"]
+    entry_price = deals[0]["entry_price"]
+    source = deals[0]["source"]
     
-    # Aggregate closes
-    total_volume = sum(d.get("volume", 0) for d in deals)
-    weighted_entry = sum(d.get("entry_price", 0) * d.get("volume", 0) for d in deals) / total_volume if total_volume > 0 else 0
-    weighted_exit = sum(d.get("exit_price", 0) * d.get("volume", 0) for d in deals) / total_volume if total_volume > 0 else 0
+    total_volume = 0
+    total_commission = 0
+    total_swap = 0
+    total_profit = 0
+    weighted_exit_price = 0
+    exit_time = None
     
-    summed_commission = sum(d.get("commission", 0) for d in deals)
-    summed_swap = sum(d.get("swap", 0) for d in deals)
-    summed_profit = sum(d.get("profit", 0) for d in deals)
+    # Process all deals
+    for deal in deals:
+        total_volume += deal["volume"]
+        total_commission += deal["commission"]
+        total_swap += deal["swap"]
+        total_profit += deal["profit"]
+        weighted_exit_price += deal["exit_price"] * deal["volume"]
+        if exit_time is None:
+            exit_time = deal["exit_time"]
+        else:
+            exit_time = max(exit_time, deal["exit_time"])
     
-    # Use first entry time and last exit time
-    entry_time = open_deal["entry_time"]
-    exit_time = deals[-1]["exit_time"]
+    # Weighted average exit price
+    if total_volume > 0:
+        weighted_exit_price /= total_volume
     
     trade = Trade(
         position_id=position_id,
-        symbol=open_deal["symbol"],
+        symbol=symbol,
         entry_time=entry_time,
-        entry_price=weighted_entry,
+        entry_price=entry_price,
         exit_time=exit_time,
-        exit_price=weighted_exit,
+        exit_price=weighted_exit_price,
         volume=total_volume,
-        commission=summed_commission,
-        swap=summed_swap,
-        profit=summed_profit,
-        direction=open_deal.get("direction", "BUY"),
-        source=open_deal.get("source", "EA LIVE"),
+        commission=total_commission,
+        swap=total_swap,
+        profit=total_profit,
+        direction=direction,
+        source=source,
     )
     
     return trade
+
+@dataclass
+class StatisticsCut:
+    """Results for a statistical cut."""
+    cut_name: str
+    cut_value: str
+    trade_count: int
+    win_count: int
+    loss_count: int
+    mean_r: float
+    r_ci_lower: float
+    r_ci_upper: float
+    win_rate: float
+    permutation_p: float
+    bh_verdict: str
+    rule_break_count: int = 0
+    premise_incomplete_count: int = 0
+
+@dataclass
+class StatisticsReport:
+    """Complete statistics report."""
+    total_trades: int
+    win_count: int
+    loss_count: int
+    win_rate: float
+    mean_r: float
+    mean_r_ci_lower: float
+    mean_r_ci_upper: float
+    cuts: List[StatisticsCut] = field(default_factory=list)
+    generated_at: datetime = field(default_factory=datetime.now)

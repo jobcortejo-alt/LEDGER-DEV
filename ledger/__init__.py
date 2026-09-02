@@ -1,4 +1,4 @@
-"""Ledger v4 – ICT trading journal with statistical analysis."""
+"""Ledger - ICT trade journal for Windows."""
 
 __version__ = "4.0.0"
-__author__ = "jobcortejo-alt"
+__author__ = "Ledger Contributors"
